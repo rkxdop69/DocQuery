@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>DocQuery</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@400;500&family=Instrument+Sans:wght@400;500&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}"/>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="logo">
+      <span class="logo-word">Doc<em>Query</em></span>
+      <span class="logo-sub">RAG · Document Q&A</span>
+    </div>
+
+    <!-- Upload -->
+    <div class="upload-zone" id="uploadZone">
+      <input type="file" id="fileInput" accept=".pdf,.txt" multiple/>
+      <div class="upload-progress" id="uploadProgress">
+        <span class="progress-text" id="progressText">Indexing...</span>
+        <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar"></div></div>
+      </div>
+      <div class="upload-icon">
+        <svg width="16" height="16" fill="none" stroke-width="1.5" viewBox="0 0 24 24">
+          <path d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M12 4v12M8 8l4-4 4 4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <div class="upload-label">
+        <strong>Drop a file here</strong>
+        PDF or TXT · click to browse
+      </div>
+    </div>
+
+    <!-- Doc list -->
+    <div class="doc-section">
+      <div class="section-label">Indexed documents</div>
+      <div class="doc-list" id="docList">
+        <span style="font-size:12px;color:var(--muted2)">No documents yet</span>
+      </div>
+    </div>
+
+    <div class="history-bar">
+      <span class="history-label">
+        Memory
+        <span class="history-badge" id="historyBadge">0</span>
+        turns
+      </span>
+      <button class="btn-clear-history" onclick="clearHistory()" title="Clear conversation memory">reset</button>
+    </div>
+
+    <button class="btn-clear" onclick="clearSession()">Clear session</button>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <div class="topbar">
+      <span class="topbar-title">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">No document loaded</span>
+      </span>
+      <span style="font-family:var(--mono);font-size:11px;color:var(--muted2)">Shift+Enter for newline</span>
+    </div>
+
+    <div class="messages" id="messages">
+      <div class="empty-state" id="emptyState">
+        <span class="empty-glyph">?</span>
+        <span class="empty-hint">Upload a document on the left, then ask anything about it.</span>
+      </div>
+    </div>
+
+    <div class="input-bar">
+      <div class="input-wrap">
+        <textarea id="question" rows="1" placeholder="Ask a question about your document…" maxlength="2000"></textarea>
+        <button class="btn-send" id="sendBtn" onclick="ask()" disabled title="Send">
+          <svg width="16" height="16" fill="none" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M5 12h14M13 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+      <div class="input-hint">↵ send &nbsp;·&nbsp; Shift+↵ newline</div>
+    </div>
+  </main>
+
+</div>
+
+<script>
+const state = { docs: [], loading: false, hasDoc: false };
+
+// ── Auto-resize textarea ──
+const ta = document.getElementById('question');
+ta.addEventListener('input', () => {
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+});
+ta.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); }
+});
+
+// ── Upload ──
+const zone = document.getElementById('uploadZone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
+zone.addEventListener('drop', e => {
+  e.preventDefault(); zone.classList.remove('drag');
+  handleFiles(e.dataTransfer.files);
+});
+
+document.getElementById('fileInput').addEventListener('change', e => handleFiles(e.target.files));
+
+async function handleFiles(files) {
+  for (const file of files) {
+    await uploadFile(file);
+  }
+}
+
+async function uploadFile(file) {
+  const progress = document.getElementById('uploadProgress');
+  const bar = document.getElementById('progressBar');
+  const ptext = document.getElementById('progressText');
+
+  progress.classList.add('active');
+  ptext.textContent = `Indexing ${file.name}…`;
+
+  // Animate bar (fake progress, real request)
+  let pct = 0;
+  const tick = setInterval(() => {
+    pct = Math.min(pct + Math.random() * 12, 85);
+    bar.style.width = pct + '%';
+  }, 200);
+
+  const fd = new FormData();
+  fd.append('file', file);
+
+  try {
+    const res = await fetch('/upload', { method: 'POST', body: fd });
+    const data = await res.json();
+    clearInterval(tick);
+
+    if (data.error) {
+      bar.style.width = '100%';
+      bar.style.background = 'var(--err)';
+      ptext.textContent = data.error;
+      setTimeout(() => resetProgress(bar), 2000);
+      return;
+    }
+
+    bar.style.width = '100%';
+    ptext.textContent = 'Done!';
+    setTimeout(() => resetProgress(bar), 600);
+
+    state.docs.push({ name: data.doc, chunks: data.chunks });
+    state.hasDoc = true;
+    renderDocs();
+    setStatus(true, `${state.docs.length} doc${state.docs.length > 1 ? 's' : ''} loaded`);
+    document.getElementById('sendBtn').disabled = false;
+
+  } catch {
+    clearInterval(tick);
+    ptext.textContent = 'Upload failed';
+    setTimeout(() => resetProgress(bar), 2000);
+  }
+}
+
+function resetProgress(bar) {
+  document.getElementById('uploadProgress').classList.remove('active');
+  bar.style.width = '0%';
+  bar.style.background = 'var(--accent)';
+  document.getElementById('fileInput').value = '';
+}
+
+function renderDocs() {
+  const list = document.getElementById('docList');
+  if (!state.docs.length) {
+    list.innerHTML = '<span style="font-size:12px;color:var(--muted2)">No documents yet</span>';
+    return;
+  }
+  list.innerHTML = state.docs.map(d => `
+    <div class="doc-pill">
+      <div class="doc-pill-icon">
+        <svg width="10" height="12" fill="none" stroke="var(--accent)" stroke-width="1.5" viewBox="0 0 10 12">
+          <rect x="1" y="1" width="8" height="10" rx="1.5"/><line x1="3" y1="4" x2="7" y2="4"/><line x1="3" y1="6.5" x2="7" y2="6.5"/><line x1="3" y1="9" x2="5.5" y2="9"/>
+        </svg>
+      </div>
+      <span class="doc-pill-name" title="${d.name}">${d.name}</span>
+      <span class="doc-chunks">${d.chunks}c</span>
+    </div>
+  `).join('');
+}
+
+function setStatus(live, text) {
+  document.getElementById('statusDot').className = 'status-dot' + (live ? ' live' : '');
+  document.getElementById('statusText').textContent = text;
+}
+
+// ── Ask ──
+async function ask() {
+  if (state.loading || !state.hasDoc) return;
+  const q = ta.value.trim();
+  if (!q) return;
+
+  hideEmpty();
+  appendMsg('user', q);
+  ta.value = '';
+  ta.style.height = 'auto';
+
+  const typingEl = appendTyping();
+  state.loading = true;
+  document.getElementById('sendBtn').disabled = true;
+
+  try {
+    const res = await fetch('/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q }),
+    });
+    const data = await res.json();
+    typingEl.remove();
+
+    if (data.error) {
+      appendMsg('error', data.error);
+    } else {
+      appendAssistant(data.answer, data.sources || []);
+      if (data.history_len !== undefined) {
+        document.getElementById('historyBadge').textContent = data.history_len;
+      }
+    }
+  } catch {
+    typingEl.remove();
+    appendMsg('error', 'Network error — is the Flask server running?');
+  }
+
+  state.loading = false;
+  document.getElementById('sendBtn').disabled = false;
+  ta.focus();
+}
+
+function hideEmpty() {
+  const e = document.getElementById('emptyState');
+  if (e) e.remove();
+}
+
+function appendMsg(role, text) {
+  const msgs = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  div.innerHTML = `
+    <span class="msg-role">${role === 'user' ? 'You' : role === 'error' ? 'Error' : 'DocQuery'}</span>
+    <div class="msg-bubble">${escHtml(text)}</div>
+  `;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div;
+}
+
+function appendAssistant(text, sources) {
+  const msgs = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+
+  const sourcesHtml = sources.length ? `
+    <div class="sources">
+      ${sources.map(s => `
+        <div class="source-chip">
+          <div class="source-chip-header">
+            <svg width="10" height="12" fill="none" stroke="var(--accent)" stroke-width="1.5" viewBox="0 0 10 12">
+              <rect x="1" y="1" width="8" height="10" rx="1.5"/>
+              <line x1="3" y1="4" x2="7" y2="4"/>
+              <line x1="3" y1="6.5" x2="7" y2="6.5"/>
+              <line x1="3" y1="9" x2="5.5" y2="9"/>
+            </svg>
+            <span class="source-chip-name" title="${escHtml(s.source)}">${escHtml(s.source)}</span>
+            <span class="source-chip-score">chunk ${s.chunk_id} · d=${s.score}</span>
+          </div>
+          <div class="source-chip-preview">${escHtml(s.preview)}</div>
+        </div>`).join('')}
+    </div>` : '';
+
+  div.innerHTML = `
+    <span class="msg-role">DocQuery</span>
+    <div class="msg-bubble">${escHtml(text)}</div>
+    ${sourcesHtml}
+  `;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function appendTyping() {
+  const msgs = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'msg assistant';
+  div.innerHTML = `
+    <span class="msg-role">DocQuery</span>
+    <div class="typing-indicator">
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+      <div class="typing-dot"></div>
+    </div>
+  `;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div;
+}
+
+async function clearSession() {
+  await fetch('/clear', { method: 'POST' });
+  state.docs = [];
+  state.hasDoc = false;
+  renderDocs();
+  setStatus(false, 'No document loaded');
+  document.getElementById('sendBtn').disabled = true;
+  document.getElementById('messages').innerHTML = `
+    <div class="empty-state" id="emptyState">
+      <span class="empty-glyph">?</span>
+      <span class="empty-hint">Upload a document on the left, then ask anything about it.</span>
+    </div>`;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+</script>
+</body>
+</html>
